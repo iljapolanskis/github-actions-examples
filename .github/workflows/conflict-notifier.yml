@@ -1,0 +1,86 @@
+name: Merge Conflict Notifier
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  notify-conflicts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect conflicts and notify PR authors
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_LIST=$(gh pr list --state open --json number,title,url,author --limit 100)
+          PR_COUNT=$(echo "$PR_LIST" | jq length)
+
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "No open PRs."
+            echo "conflict_summary=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SUMMARY_LINES=""
+
+          for i in $(seq 0 $((PR_COUNT - 1))); do
+            NUMBER=$(echo "$PR_LIST" | jq -r ".[$i].number")
+            TITLE=$(echo "$PR_LIST"  | jq -r ".[$i].title")
+            URL=$(echo "$PR_LIST"    | jq -r ".[$i].url")
+            AUTHOR=$(echo "$PR_LIST" | jq -r ".[$i].author.login")
+
+            MERGEABLE="null"
+            for attempt in 1 2 3; do
+              MERGEABLE=$(gh pr view "$NUMBER" --json mergeable --jq '.mergeable')
+              if [ "$MERGEABLE" != "null" ] && [ -n "$MERGEABLE" ]; then
+                break
+              fi
+              echo "PR #${NUMBER}: mergeable not ready, retry ${attempt}/3..."
+              sleep 10
+            done
+
+            if [ "$MERGEABLE" != "CONFLICTING" ]; then
+              continue
+            fi
+
+            SLACK_USER_ID=$(jq -r --arg login "$AUTHOR" '.[$login] // empty' .github/slack-users.json)
+
+            if [ -n "$SLACK_USER_ID" ]; then
+              MENTION="<@${SLACK_USER_ID}>"
+            else
+              MENTION="@${AUTHOR}"
+            fi
+            SUMMARY_LINES="${SUMMARY_LINES}\n• <${URL}|#${NUMBER} ${TITLE}> — ${MENTION}"
+          done
+
+          if [ -n "$SUMMARY_LINES" ]; then
+            echo "conflict_summary<<EOF" >> "$GITHUB_OUTPUT"
+            printf "%b" "$SUMMARY_LINES" >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict_summary=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post conflict summary to channel
+        if: steps.detect.outputs.conflict_summary != ''
+        uses: slackapi/slack-github-action@v3.0.3
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "C0B54RRFWG4"
+            text: "Merge conflicts detected after push to master"
+            blocks:
+              - type: "section"
+                text:
+                  type: "mrkdwn"
+                  text: "*Merge conflicts after push to master:*\n${{ steps.detect.outputs.conflict_summary }}"
+              - type: "context"
+                elements:
+                  - type: "mrkdwn"
+                    text: "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
