@@ -2,16 +2,16 @@ name: Merge Conflict Notifier
 
 on:
   push:
-    branches:
-      - master
 
 jobs:
-  notify-conflicts:
+  # Triggered on master push: checks ALL open PRs for conflicts
+  notify-all-conflicts:
+    if: github.ref_name == 'master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect conflicts and notify PR authors
+      - name: Detect conflicts across all open PRs
         id: detect
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -26,8 +26,6 @@ jobs:
           fi
 
           SUMMARY_LINES=""
-
-          # Build initial pending stack: space-separated indices
           PENDING=$(seq 0 $((PR_COUNT - 1)) | tr '\n' ' ')
 
           for round in 1 2 3; do
@@ -49,11 +47,11 @@ jobs:
                   MENTION="@${AUTHOR}"
                 fi
                 SUMMARY_LINES="${SUMMARY_LINES}\n• <${URL}|#${NUMBER} ${TITLE}> — ${MENTION}"
-              elif [ -z "$MERGEABLE" ] || [ "$MERGEABLE" = "null" ]; then
-                echo "PR #${NUMBER}: state not ready (round ${round}/3), queued for retry."
-                NEXT_PENDING="${NEXT_PENDING} ${i}"
+              elif [ "$MERGEABLE" = "MERGEABLE" ]; then
+                echo "PR #${NUMBER}: MERGEABLE — no conflict."
               else
-                echo "PR #${NUMBER}: state=${MERGEABLE} — no conflict."
+                echo "PR #${NUMBER}: state=${MERGEABLE} not ready (round ${round}/3), queued for retry."
+                NEXT_PENDING="${NEXT_PENDING} ${i}"
               fi
             done
 
@@ -91,6 +89,83 @@ jobs:
                 text:
                   type: "mrkdwn"
                   text: "*Merge conflicts after push to master:*\n${{ steps.detect.outputs.conflict_summary }}"
+              - type: "context"
+                elements:
+                  - type: "mrkdwn"
+                    text: "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
+
+  # Triggered on feature branch push: checks only the PR for that branch
+  notify-own-pr-conflict:
+    if: github.ref_name != 'master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if this branch's PR conflicts with master
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.ref_name }}"
+
+          PR_JSON=$(gh pr list --head "$BRANCH" --state open --json number,title,url,author --limit 1)
+          PR_COUNT=$(echo "$PR_JSON" | jq length)
+
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "No open PR for branch ${BRANCH} — skipping."
+            echo "conflict_summary=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number')
+          TITLE=$(echo "$PR_JSON"  | jq -r '.[0].title')
+          URL=$(echo "$PR_JSON"    | jq -r '.[0].url')
+          AUTHOR=$(echo "$PR_JSON" | jq -r '.[0].author.login')
+
+          for round in 1 2 3; do
+            MERGEABLE=$(gh pr view "$NUMBER" --json mergeable --jq '.mergeable')
+
+            if [ "$MERGEABLE" = "CONFLICTING" ]; then
+              SLACK_USER_ID=$(jq -r --arg login "$AUTHOR" '.[$login] // empty' .github/slack-users.json)
+              if [ -n "$SLACK_USER_ID" ]; then
+                MENTION="<@${SLACK_USER_ID}>"
+              else
+                MENTION="@${AUTHOR}"
+              fi
+              echo "conflict_summary<<EOF" >> "$GITHUB_OUTPUT"
+              printf "• <%s|#%s %s> — %s" "$URL" "$NUMBER" "$TITLE" "$MENTION" >> "$GITHUB_OUTPUT"
+              echo "" >> "$GITHUB_OUTPUT"
+              echo "EOF" >> "$GITHUB_OUTPUT"
+              break
+            elif [ "$MERGEABLE" = "MERGEABLE" ]; then
+              echo "PR #${NUMBER}: MERGEABLE — no conflict."
+              echo "conflict_summary=" >> "$GITHUB_OUTPUT"
+              break
+            else
+              echo "PR #${NUMBER}: state=${MERGEABLE} not ready (round ${round}/3), retrying..."
+              if [ "$round" -lt 3 ]; then
+                sleep 30
+              else
+                echo "PR #${NUMBER}: still unknown after 3 rounds — skipping."
+                echo "conflict_summary=" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+          done
+
+      - name: Notify author of conflict
+        if: steps.detect.outputs.conflict_summary != ''
+        uses: slackapi/slack-github-action@v3.0.3
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "C0B54RRFWG4"
+            text: "Your PR has conflicts with master"
+            blocks:
+              - type: "section"
+                text:
+                  type: "mrkdwn"
+                  text: "*PR conflicts with master after push to `${{ github.ref_name }}`:*\n${{ steps.detect.outputs.conflict_summary }}"
               - type: "context"
                 elements:
                   - type: "mrkdwn"
