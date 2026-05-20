@@ -1,0 +1,2 @@
+This line will cause a conflict.
+This line is safe.
