@@ -49,11 +49,11 @@ jobs:
                   MENTION="@${AUTHOR}"
                 fi
                 SUMMARY_LINES="${SUMMARY_LINES}\n• <${URL}|#${NUMBER} ${TITLE}> — ${MENTION}"
-              elif [ -z "$MERGEABLE" ] || [ "$MERGEABLE" = "null" ]; then
-                echo "PR #${NUMBER}: state not ready (round ${round}/3), queued for retry."
-                NEXT_PENDING="${NEXT_PENDING} ${i}"
+              elif [ "$MERGEABLE" = "MERGEABLE" ]; then
+                echo "PR #${NUMBER}: state=MERGEABLE — no conflict."
               else
-                echo "PR #${NUMBER}: state=${MERGEABLE} — no conflict."
+                echo "PR #${NUMBER}: state=${MERGEABLE} not ready (round ${round}/3), queued for retry."
+                NEXT_PENDING="${NEXT_PENDING} ${i}"
               fi
             done
 
