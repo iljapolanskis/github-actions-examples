@@ -1,2 +1,2 @@
-This line will cause a conflict.
+Branch A changes this line.
 This line is safe.
