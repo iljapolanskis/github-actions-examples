@@ -1,2 +1,3 @@
 Branch B changes this line differently.
 This line is safe.
+This line is also safe.
