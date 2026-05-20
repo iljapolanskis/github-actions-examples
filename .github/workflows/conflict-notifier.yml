@@ -27,34 +27,45 @@ jobs:
 
           SUMMARY_LINES=""
 
-          for i in $(seq 0 $((PR_COUNT - 1))); do
-            NUMBER=$(echo "$PR_LIST" | jq -r ".[$i].number")
-            TITLE=$(echo "$PR_LIST"  | jq -r ".[$i].title")
-            URL=$(echo "$PR_LIST"    | jq -r ".[$i].url")
-            AUTHOR=$(echo "$PR_LIST" | jq -r ".[$i].author.login")
+          # Build initial pending stack: space-separated indices
+          PENDING=$(seq 0 $((PR_COUNT - 1)) | tr '\n' ' ')
 
-            MERGEABLE="null"
-            for attempt in 1 2 3; do
+          for round in 1 2 3; do
+            NEXT_PENDING=""
+
+            for i in $PENDING; do
+              NUMBER=$(echo "$PR_LIST" | jq -r ".[$i].number")
+              TITLE=$(echo "$PR_LIST"  | jq -r ".[$i].title")
+              URL=$(echo "$PR_LIST"    | jq -r ".[$i].url")
+              AUTHOR=$(echo "$PR_LIST" | jq -r ".[$i].author.login")
+
               MERGEABLE=$(gh pr view "$NUMBER" --json mergeable --jq '.mergeable')
-              if [ "$MERGEABLE" != "null" ] && [ -n "$MERGEABLE" ]; then
-                break
+
+              if [ "$MERGEABLE" = "CONFLICTING" ]; then
+                SLACK_USER_ID=$(jq -r --arg login "$AUTHOR" '.[$login] // empty' .github/slack-users.json)
+                if [ -n "$SLACK_USER_ID" ]; then
+                  MENTION="<@${SLACK_USER_ID}>"
+                else
+                  MENTION="@${AUTHOR}"
+                fi
+                SUMMARY_LINES="${SUMMARY_LINES}\n• <${URL}|#${NUMBER} ${TITLE}> — ${MENTION}"
+              elif [ -z "$MERGEABLE" ] || [ "$MERGEABLE" = "null" ]; then
+                echo "PR #${NUMBER}: state not ready (round ${round}/3), queued for retry."
+                NEXT_PENDING="${NEXT_PENDING} ${i}"
+              else
+                echo "PR #${NUMBER}: state=${MERGEABLE} — no conflict."
               fi
-              echo "PR #${NUMBER}: mergeable not ready, retry ${attempt}/3..."
-              sleep 10
             done
 
-            if [ "$MERGEABLE" != "CONFLICTING" ]; then
-              continue
+            PENDING="$NEXT_PENDING"
+            if [ -z "$(echo "$PENDING" | tr -d ' ')" ]; then
+              break
             fi
 
-            SLACK_USER_ID=$(jq -r --arg login "$AUTHOR" '.[$login] // empty' .github/slack-users.json)
-
-            if [ -n "$SLACK_USER_ID" ]; then
-              MENTION="<@${SLACK_USER_ID}>"
-            else
-              MENTION="@${AUTHOR}"
+            if [ "$round" -lt 3 ]; then
+              echo "Waiting 30s for GitHub to compute mergeable state for pending PRs..."
+              sleep 30
             fi
-            SUMMARY_LINES="${SUMMARY_LINES}\n• <${URL}|#${NUMBER} ${TITLE}> — ${MENTION}"
           done
 
           if [ -n "$SUMMARY_LINES" ]; then
